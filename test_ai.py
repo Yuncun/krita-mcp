@@ -13,11 +13,12 @@ It works in its own new document and closes it at the end.
 """
 
 import sys
+import time
 
 from test_mcp import FAIL, PASS, Client, _image_of, _text_of, check, section
 
 GENERATE = "--generate" in sys.argv
-DOC = "ai-tools-test"
+DOC = "ai-tools-test-{0}".format(int(time.time()))
 
 
 def main():
@@ -39,7 +40,11 @@ def main():
 
         section("status")
         client.ok("create_document", {"width": 512, "height": 384, "name": DOC})
+        deadline = time.time() + 90
         status, _ = client.ok("ai_status")
+        while status["connection"] == "connecting" and time.time() < deadline:
+            time.sleep(1)
+            status, _ = client.ok("ai_status")
         check("plugin connected", status["connection"] == "connected",
               status["connection"])
         styles, _ = client.ok("ai_list_styles")
@@ -121,6 +126,8 @@ def main():
                   _text_of(result)[:300])
             check("result image returned", _image_of(result) is not None)
             jobs, _ = client.ok("ai_jobs")
+            if not jobs["jobs"]:
+                raise AssertionError("no AI job was created")
             job = jobs["jobs"][-1]
             check("job finished with a result",
                   job["state"] == "finished" and job["results"] == 1, str(job))

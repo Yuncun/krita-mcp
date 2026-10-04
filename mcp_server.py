@@ -617,6 +617,21 @@ def _comfy_position(server, prompt_id):
     return None
 
 
+def _ai_connected_status(document, timeout=90.0):
+    """ai_status, after waiting for the plugin to finish connecting.
+
+    Right after Krita starts, the plugin spends a while connecting to ComfyUI
+    and loading its model list; generating then fails, so wait it out.
+    """
+    args = {"document": document} if document is not None else {}
+    deadline = time.time() + timeout
+    while True:
+        status = BRIDGE.call("ai_status", args)
+        if status["connection"] != "connecting" or time.time() > deadline:
+            return status
+        time.sleep(1.0)
+
+
 def _ai_new_jobs(document, known_ids, expected, deadline):
     """Wait briefly for the jobs ai_generate created to appear in the plugin."""
     args = {"document": document} if document is not None else {}
@@ -668,11 +683,9 @@ def _ai_generate(args):
     wait = _clamp_wait(args)
     priority = bool(args.pop("priority", False))
     max_size = int(args.pop("max_size", 768))
+    status = _ai_connected_status(document)
     if args.keys() - {"document"}:
-        settings = dict(args)
-        BRIDGE.call("ai_configure", settings)
-    status = BRIDGE.call("ai_status", {"document": document}
-                         if document is not None else {})
+        BRIDGE.call("ai_configure", args)
     started = BRIDGE.call("ai_generate", {"document": document}
                           if document is not None else {})
     new = _ai_new_jobs(document, set(started["existing_job_ids"]),

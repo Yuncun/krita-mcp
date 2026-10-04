@@ -747,6 +747,10 @@ def op_close_document(params):
     # any of its settings change; closing first crashes Krita.
     from . import ai
     ai.settle_pending_saves(doc)
+    # The layer docker batches its updates on a timer and processes them
+    # later; if that runs after the image is gone it reads freed layer data
+    # (KisNodeModel::processUpdateQueue). Let it drain while the image lives.
+    _settle_after_close(0.3)
     doc.setBatchmode(True)
     # Document.close() closes the document's views, and a view whose document
     # is still dirty puts up a modal "save changes?" prompt. That dialog runs
