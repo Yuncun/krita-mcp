@@ -42,7 +42,8 @@ def main():
         client.ok("create_document", {"width": 512, "height": 384, "name": DOC})
         deadline = time.time() + 90
         status, _ = client.ok("ai_status")
-        while status["connection"] == "connecting" and time.time() < deadline:
+        while (status["connection"] in ("connecting", "discover_models")
+               and time.time() < deadline):
             time.sleep(1)
             status, _ = client.ok("ai_status")
         check("plugin connected", status["connection"] == "connected",

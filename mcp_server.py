@@ -568,6 +568,7 @@ AI_POLL_SECONDS = 2.0
 AI_DEFAULT_WAIT = 300
 AI_MAX_WAIT = 1800
 AI_FINISHED = ("finished", "cancelled")
+AI_CONNECTING = ("connecting", "discover_models")
 
 
 def _comfy(server, path, body=None, timeout=10.0):
@@ -627,7 +628,8 @@ def _ai_connected_status(document, timeout=90.0):
     deadline = time.time() + timeout
     while True:
         status = BRIDGE.call("ai_status", args)
-        if status["connection"] != "connecting" or time.time() > deadline:
+        if (status["connection"] not in AI_CONNECTING
+                or time.time() > deadline):
             return status
         time.sleep(1.0)
 
