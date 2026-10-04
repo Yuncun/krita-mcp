@@ -743,6 +743,10 @@ def op_close_document(params):
                 .format(summary["name"]), kind="unsaved_changes")
 
     _trace("close: about to close {0!r}".format(summary["name"]))
+    # The AI Image Generation plugin writes into the document shortly after
+    # any of its settings change; closing first crashes Krita.
+    from . import ai
+    ai.settle_pending_saves(doc)
     doc.setBatchmode(True)
     # Document.close() closes the document's views, and a view whose document
     # is still dirty puts up a modal "save changes?" prompt. That dialog runs

@@ -6,7 +6,7 @@ from .compat import QMessageBox
 
 from krita import Extension, Krita
 
-from . import ops
+from . import ai, ops  # ai registers the ai_* operations
 from .httpserver import DEFAULT_PORT, Bridge, info_file_path
 from .mainthread import MainThreadInvoker
 

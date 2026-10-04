@@ -554,6 +554,301 @@ TOOLS = [
          {}),
 ]
 
+
+# ---------------------------------------------------------------------------
+# AI image generation (Acly's krita-ai-diffusion plugin)
+# ---------------------------------------------------------------------------
+#
+# The ai_* operations in the plugin only start work, because they run on
+# Krita's UI thread. Waiting for a generation happens here, by polling
+# `ai_jobs`. The plugin's ComfyUI server is talked to directly only to read
+# the queue and, when asked, to move our jobs to its front.
+
+AI_POLL_SECONDS = 2.0
+AI_DEFAULT_WAIT = 300
+AI_MAX_WAIT = 1800
+AI_FINISHED = ("finished", "cancelled")
+
+
+def _comfy(server, path, body=None, timeout=10.0):
+    import urllib.request
+    url = "http://{0}{1}".format(server, path)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else {}
+
+
+def _comfy_prioritize(server, prompt_ids):
+    """Move pending prompts to the front of ComfyUI's queue, keeping their ids.
+
+    ComfyUI has no "reorder" call, so each prompt is deleted and re-posted
+    with front=true under the same prompt_id and client_id; the plugin keeps
+    tracking it by that id.
+    """
+    queue = _comfy(server, "/queue")
+    moved = []
+    for item in queue.get("queue_pending", []):
+        number, prompt_id, prompt, extra = item[0], item[1], item[2], item[3]
+        if prompt_id not in prompt_ids:
+            continue
+        _comfy(server, "/queue", {"delete": [prompt_id]})
+        _comfy(server, "/prompt", {"prompt": prompt, "prompt_id": prompt_id,
+                                   "client_id": extra.get("client_id"),
+                                   "extra_data": extra, "front": True})
+        moved.append(prompt_id)
+    return moved
+
+
+def _comfy_position(server, prompt_id):
+    """'running', 'queued #N of M', or None if ComfyUI does not have it."""
+    try:
+        queue = _comfy(server, "/queue")
+    except Exception:
+        return None
+    if any(item[1] == prompt_id for item in queue.get("queue_running", [])):
+        return "running"
+    pending = sorted(queue.get("queue_pending", []), key=lambda item: item[0])
+    for position, item in enumerate(pending, 1):
+        if item[1] == prompt_id:
+            return "queued #{0} of {1}".format(position, len(pending))
+    return None
+
+
+def _ai_new_jobs(document, known_ids, expected, deadline):
+    """Wait briefly for the jobs ai_generate created to appear in the plugin."""
+    args = {"document": document} if document is not None else {}
+    while True:
+        jobs = BRIDGE.call("ai_jobs", args)["jobs"]
+        new = [j for j in jobs if j["id"] and j["id"] not in known_ids]
+        if len(new) >= expected or time.time() > deadline:
+            return new
+        time.sleep(0.5)
+
+
+def _ai_wait(document, job_ids, timeout, server, max_size):
+    args = {"document": document} if document is not None else {}
+    deadline = time.time() + timeout
+    while True:
+        listing = BRIDGE.call("ai_jobs", args)
+        jobs = [j for j in listing["jobs"] if j["id"] in job_ids]
+        done = all(j["state"] in AI_FINISHED for j in jobs) and jobs
+        if done or time.time() > deadline:
+            break
+        time.sleep(AI_POLL_SECONDS)
+
+    summary = {"jobs": jobs, "error": listing.get("error")}
+    if not done:
+        summary["timed_out_after_s"] = timeout
+        summary["comfyui_queue"] = {j["id"]: _comfy_position(server, j["id"])
+                                    for j in jobs
+                                    if j["state"] not in AI_FINISHED}
+        summary["next"] = "Call ai_wait with these job ids to keep waiting."
+    content = [{"type": "text", "text": _summarise(summary)}]
+    for job in jobs:
+        for index in range(job["results"]):
+            result = BRIDGE.call("ai_get_result", dict(
+                args, job=job["id"], index=index, max_size=max_size))
+            content.append({"type": "text", "text": "job {0} result {1}".format(
+                job["id"], index)})
+            content.append({"type": "image", "data": result["png_base64"],
+                            "mimeType": "image/png"})
+    return content
+
+
+def _clamp_wait(args):
+    wait = args.pop("wait_seconds", AI_DEFAULT_WAIT)
+    return max(0, min(AI_MAX_WAIT, int(wait)))
+
+
+def _ai_generate(args):
+    document = args.get("document")
+    wait = _clamp_wait(args)
+    priority = bool(args.pop("priority", False))
+    max_size = int(args.pop("max_size", 768))
+    if args.keys() - {"document"}:
+        settings = dict(args)
+        BRIDGE.call("ai_configure", settings)
+    status = BRIDGE.call("ai_status", {"document": document}
+                         if document is not None else {})
+    started = BRIDGE.call("ai_generate", {"document": document}
+                          if document is not None else {})
+    new = _ai_new_jobs(document, set(started["existing_job_ids"]),
+                       started["expected_jobs"], time.time() + 20)
+    job_ids = [j["id"] for j in new]
+    if not job_ids:
+        raise BridgeError("ai_error", "The AI plugin did not create a job. "
+                          "Check ai_status for its error.")
+    note = {"started_jobs": job_ids}
+    if priority:
+        try:
+            note["moved_to_front_of_comfyui_queue"] = _comfy_prioritize(
+                status["server"], set(job_ids))
+        except Exception as exc:
+            note["priority_failed"] = "{0}: {1}".format(type(exc).__name__, exc)
+    if wait == 0:
+        return [{"type": "text", "text": _summarise(note)}]
+    content = _ai_wait(document, set(job_ids), wait, status["server"], max_size)
+    return [{"type": "text", "text": _summarise(note)}] + content
+
+
+def _ai_wait_tool(args):
+    document = args.get("document")
+    wait = _clamp_wait(args)
+    status = BRIDGE.call("ai_status", {"document": document}
+                         if document is not None else {})
+    return _ai_wait(document, set(args["jobs"]), wait, status["server"],
+                    int(args.get("max_size", 768)))
+
+
+AI_SETTINGS_PROPS = {
+    "style": {"type": "string",
+              "description": "Style file or name from ai_list_styles."},
+    "prompt": {"type": "string",
+               "description": "Main prompt. In edit mode, write an instruction; "
+                              "`<layer:Name>` passes that layer as a reference "
+                              "picture."},
+    "negative": {"type": "string"},
+    "strength": {"type": "number",
+                 "description": "1.0 = generate fresh; below 1 refines the "
+                                "existing pixels (0.3 subtle, 0.7 strong)."},
+    "seed": {"type": "integer"},
+    "fixed_seed": {"type": "boolean"},
+    "batch_count": {"type": "integer"},
+    "edit_mode": {"type": "boolean",
+                  "description": "Use the style's instruction-edit model."},
+    "region_only": {"type": "boolean",
+                    "description": "With regions: generate only the active "
+                                   "region's layer, not its whole group."},
+    "resolution_multiplier": {"type": "number"},
+    "inpaint_mode": {"type": "string",
+                     "enum": ["automatic", "fill", "expand", "add_object",
+                              "remove_object", "replace_background", "custom"]},
+    "inpaint_fill": {"type": "string",
+                     "enum": ["none", "neutral", "blur", "border", "replace",
+                              "inpaint"]},
+    "use_inpaint_model": {"type": "boolean"},
+    "use_prompt_focus": {"type": "boolean"},
+    "inpaint_context": {"type": "string",
+                        "enum": ["automatic", "mask_bounds", "entire_image",
+                                 "layer_bounds"],
+                        "description": "How much of the picture around the "
+                                       "selection the model sees (needs "
+                                       "inpaint_mode=custom)."},
+    "inpaint_context_layer": {"type": "string",
+                              "description": "Layer for layer_bounds context."},
+}
+
+AI_TOOLS = [
+    tool("ai_status",
+         "The AI Image Generation docker's state for a document: connection, "
+         "style and its model family, prompt, strength, edit mode, inpaint "
+         "settings, selection, regions, control/reference layers, recent "
+         "jobs. Start here before any AI work.",
+         {"document": DOCUMENT_PROP}),
+
+    tool("ai_list_styles",
+         "Styles (model + sampler presets) the AI plugin can use with the "
+         "connected ComfyUI. `edits_images` marks instruction-edit models.",
+         {"document": DOCUMENT_PROP,
+          "include_unsupported": {"type": "boolean", "default": False}}),
+
+    tool("ai_configure",
+         "Change AI docker settings without generating. Omitted fields stay "
+         "as they are. The docker shows every change.",
+         dict(AI_SETTINGS_PROPS, document=DOCUMENT_PROP,
+              workspace={"type": "string",
+                         "enum": ["generation", "upscaling", "live",
+                                  "animation", "custom"]})),
+
+    tool("ai_set_region",
+         "Attach a regional prompt to a layer: the layer's painted (non-"
+         "transparent) pixels mark where that prompt applies. Paint a rough "
+         "shape on a new layer first (create_layer + draw), then link it. "
+         "`remove` unlinks it and keeps the pixels.",
+         {"document": DOCUMENT_PROP, "layer": LAYER_PROP,
+          "prompt": {"type": "string"},
+          "remove": {"type": "boolean", "default": False}},
+         required=["layer"]),
+
+    tool("ai_set_control",
+         "Use a layer as a control or reference input, for the whole image or "
+         "one region (`region` = the region's layer). Modes: reference/style/"
+         "composition/face (image prompt), scribble/line_art/soft_edge/"
+         "canny_edge/depth/normal/pose/segmentation/blur/stencil/hands "
+         "(structure). `remove` detaches it.",
+         {"document": DOCUMENT_PROP, "layer": LAYER_PROP,
+          "region": {"type": "string"},
+          "mode": {"type": "string", "default": "reference"},
+          "strength": {"type": "number",
+                       "description": "0-1.5, 1 = normal. Omit for the "
+                                      "mode's preset."},
+          "start": {"type": "number"}, "end": {"type": "number"},
+          "remove": {"type": "boolean", "default": False}},
+         required=["layer"]),
+
+    tool("ai_generate",
+         "Generate with the AI plugin, like pressing its Generate button, "
+         "optionally changing settings first (same fields as ai_configure). "
+         "What gets generated depends on the canvas: an active selection = "
+         "inpaint only that area (the model sees the visible layers around "
+         "it); otherwise the active region; otherwise the whole canvas. "
+         "Waits for the result and returns the images. Results appear as a "
+         "preview layer; call ai_apply to keep one.",
+         dict(AI_SETTINGS_PROPS, document=DOCUMENT_PROP,
+              priority={"type": "boolean", "default": False,
+                        "description": "Move these jobs to the front of "
+                                       "ComfyUI's queue, ahead of other work."},
+              wait_seconds={"type": "integer", "default": AI_DEFAULT_WAIT,
+                            "description": "0 = return at once with job ids."},
+              max_size={"type": "integer", "default": 768})),
+
+    tool("ai_wait",
+         "Keep waiting for AI jobs started earlier, then return their images.",
+         {"document": DOCUMENT_PROP,
+          "jobs": {"type": "array", "items": {"type": "string"}},
+          "wait_seconds": {"type": "integer", "default": AI_DEFAULT_WAIT},
+          "max_size": {"type": "integer", "default": 768}},
+         required=["jobs"]),
+
+    tool("ai_jobs", "Every job in the AI plugin's history for a document.",
+         {"document": DOCUMENT_PROP}),
+
+    tool("ai_get_result", "Return one generated image at full detail.",
+         {"document": DOCUMENT_PROP, "job": {"type": "string"},
+          "index": {"type": "integer", "default": 0},
+          "max_size": {"type": "integer", "default": 1024}},
+         required=["job"], image=True),
+
+    tool("ai_apply",
+         "Keep a result: put it on the canvas as a new layer (default, the "
+         "docker's setting) or `behavior`=replace to modify the active layer.",
+         {"document": DOCUMENT_PROP, "job": {"type": "string"},
+          "index": {"type": "integer", "default": 0},
+          "behavior": {"type": "string",
+                       "enum": ["layer", "layer_active", "replace"]}},
+         required=["job"]),
+
+    tool("ai_discard",
+         "Remove the preview layer; with `job`, also drop that job's images.",
+         {"document": DOCUMENT_PROP, "job": {"type": "string"}}),
+
+    tool("ai_cancel", "Cancel the running and/or queued AI jobs.",
+         {"document": DOCUMENT_PROP,
+          "active": {"type": "boolean", "default": True},
+          "queued": {"type": "boolean", "default": True}}),
+]
+
+for _spec in AI_TOOLS:
+    if _spec["name"] == "ai_generate":
+        _spec["_handler"] = _ai_generate
+    elif _spec["name"] == "ai_wait":
+        _spec["_handler"] = _ai_wait_tool
+TOOLS.extend(AI_TOOLS)
+
+
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
 
@@ -577,6 +872,8 @@ def call_tool(name, arguments):
                               name, ", ".join(sorted(TOOLS_BY_NAME))))
 
     args = dict(arguments or {})
+    if spec.get("_handler") is not None:
+        return spec["_handler"](args)
     op = spec["_op"]
     if spec["_transform"] is not None:
         op, args = spec["_transform"](args)
@@ -678,7 +975,21 @@ class Server:
                 "Drives a running Krita instance. Call `status` to see open "
                 "documents, `inspect_document` for the layer tree, `draw` to "
                 "paint onto a paint layer, and `get_image` to look at the "
-                "result. If nothing responds, run `self_test`."
+                "result. If nothing responds, run `self_test`.\n\n"
+                "AI generation goes through the AI Image Generation plugin "
+                "(ai_* tools), so Eric sees every change in its docker. "
+                "To change one area: look first (get_image, inspect_document), "
+                "set_selection around the area, then ai_generate with a prompt "
+                "describing what should be there; the model sees the visible "
+                "layers around the selection. Adding an object: "
+                "inpaint_mode=add_object. Keeping it close to what is there: "
+                "strength below 1. Different prompts for different areas: paint "
+                "rough shapes on separate layers and link them with "
+                "ai_set_region. Edit models (style with edits_images) take an "
+                "instruction prompt and can see other layers via "
+                "`<layer:Name>`. Show Eric the result images and ai_apply only "
+                "the one he wants (or the clear best, when he said to go "
+                "ahead). Clear the selection afterwards."
             ),
         }
 
