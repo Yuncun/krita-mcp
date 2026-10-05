@@ -732,6 +732,10 @@ AI_SETTINGS_PROPS = {
     "seed": {"type": "integer"},
     "fixed_seed": {"type": "boolean"},
     "batch_count": {"type": "integer"},
+    "layer_count": {"type": "integer",
+                    "description": "Layered styles only (arch qwen_l): how "
+                                   "many layers to split the canvas into, "
+                                   "1-10."},
     "edit_mode": {"type": "boolean",
                   "description": "Use the style's instruction-edit model."},
     "region_only": {"type": "boolean",
@@ -1002,7 +1006,8 @@ class Server:
                 "rough shapes on separate layers and link them with "
                 "ai_set_region. Edit models (style with edits_images) take an "
                 "instruction prompt and can see other layers via "
-                "`<layer:Name>`. Show the user the result images and ai_apply only "
+                "`<layer:Name>`. A style with arch qwen_l splits the "
+                "canvas into `layer_count` separate layers. Show the user the result images and ai_apply only "
                 "the one they want (or the clear best, when they said to go "
                 "ahead). Clear the selection afterwards."
             ),

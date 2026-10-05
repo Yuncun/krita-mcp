@@ -202,6 +202,7 @@ def _status(p, model):
         "seed": model.seed,
         "fixed_seed": model.fixed_seed,
         "batch_count": model.batch_count,
+        "layer_count": model.layer_count,
         "region_only": model.region_only,
         "resolution_multiplier": model.resolution_multiplier,
         "inpaint": {
@@ -263,7 +264,7 @@ _SETTERS = ("workspace", "style", "prompt", "negative", "strength", "seed",
             "fixed_seed", "batch_count", "edit_mode", "region_only",
             "resolution_multiplier", "inpaint_mode", "inpaint_fill",
             "use_inpaint_model", "use_prompt_focus", "inpaint_context",
-            "inpaint_context_layer")
+            "inpaint_context_layer", "layer_count")
 
 
 @op("ai_configure", timeout=20.0, mutates=True)
@@ -330,6 +331,9 @@ def op_ai_configure(params):
     if "use_prompt_focus" in params:
         model.inpaint.use_prompt_focus = _as_bool(params["use_prompt_focus"],
                                                   "use_prompt_focus")
+    if "layer_count" in params:
+        model.layer_count = max(1, min(10, _as_int(params["layer_count"],
+                                                    "layer_count")))
     if context is not None:
         model.inpaint.context = context
     if context_layer is not None:
