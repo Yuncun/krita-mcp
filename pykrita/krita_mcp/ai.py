@@ -517,6 +517,17 @@ def op_ai_cancel(params):
 # document teardown
 # --------------------------------------------------------------------------
 
+def pending_plugin_tasks():
+    """Strong references to the AI plugin's unfinished asyncio tasks."""
+    import asyncio
+
+    eventloop = sys.modules.get("ai_diffusion.eventloop")
+    loop = getattr(eventloop, "_loop", None)
+    if loop is None or loop.is_closed():
+        return set()
+    return asyncio.all_tasks(loop)
+
+
 def settle_pending_saves(doc, budget=3.0):
     """Wait for the AI plugin to finish writing its state into ``doc``.
 

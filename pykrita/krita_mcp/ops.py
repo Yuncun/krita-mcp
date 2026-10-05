@@ -482,7 +482,21 @@ def _settle_after_close(budget=0.6):
         app.processEvents(QEventLoop.ExcludeUserInputEvents, 20)
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         time.sleep(0.01)
+    _collect_garbage()
+
+
+def _collect_garbage():
+    """gc.collect(), without destroying other plugins' pending asyncio tasks.
+
+    asyncio keeps only weak references to tasks. The AI Image Generation
+    plugin starts some (its ComfyUI connection among them) without keeping a
+    reference, so a full collection deletes them mid-await and the plugin
+    stays "connecting" forever. Holding them for the duration prevents that.
+    """
+    from . import ai
+    pending = ai.pending_plugin_tasks()
     gc.collect()
+    del pending
 
 
 def _describe(doc, node):
@@ -778,7 +792,7 @@ def op_close_document(params):
     # Force a collection while the document is still valid. Any libkis wrapper
     # left unreachable by an earlier operation is destroyed here, rather than
     # at some arbitrary later point when its C++ object is already gone.
-    gc.collect()
+    _collect_garbage()
 
     # KNOWN KRITA DEFECT (5.3.3): tearing a document down occasionally faults
     # inside Krita's own C++ teardown, taking the process with it. Measured at
