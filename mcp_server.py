@@ -1156,7 +1156,11 @@ class Server:
                 "`<layer:Name>`. To split the canvas into layers, use "
                 "fal_run with fal-ai/qwen-image-layered (the plugin's own "
                 "Qwen Layered mode returns unrelated layers in 1.53, issues "
-                "#2304 and #2535). Show the user the result images and ai_apply only "
+                "#2304 and #2535). It takes only a layer count and decides "
+                "what goes on each layer; its `prompt` is a caption of the "
+                "whole picture and does not pick the layers, and extra layers "
+                "tend to become shadows or duplicates rather than smaller "
+                "parts. Show the user the result images and ai_apply only "
                 "the one they want (or the clear best, when they said to go "
                 "ahead). Clear the selection afterwards."
             ),
