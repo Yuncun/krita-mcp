@@ -7,6 +7,7 @@ plugin connected to its ComfyUI server.
 
     python test_ai.py              # settings, regions, controls (no rendering)
     python test_ai.py --generate   # also render one small image (ComfyUI time)
+    python test_ai.py --fal        # also split the canvas on fal.ai ($0.05)
     python test_ai.py -v           # print each tool result
 
 It works in its own new document and closes it at the end.
@@ -144,6 +145,20 @@ def main():
             check("no preview layer left behind",
                   not any(l["name"].startswith("[Preview]")
                           for l in info["layers"]),
+                  str([l["name"] for l in info["layers"]]))
+
+        if "--fal" in sys.argv:
+            section("fal")
+            result = client.call("fal_run", {
+                "model": "fal-ai/qwen-image-layered", "image_input": "image_url",
+                "arguments": {"num_layers": 2}, "max_size": 128}, timeout=700)
+            check("fal_run succeeded", not result.get("isError"),
+                  _text_of(result)[:300])
+            info, _ = client.ok("inspect_document")
+            group = next((l for l in info["layers"]
+                          if l["name"] == "fal qwen-image-layered"), None)
+            check("fal results added as a layer group",
+                  group is not None and len(group.get("children", [])) >= 2,
                   str([l["name"] for l in info["layers"]]))
 
         section("cleanup")

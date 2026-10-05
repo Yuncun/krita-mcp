@@ -868,6 +868,151 @@ for _spec in AI_TOOLS:
 TOOLS.extend(AI_TOOLS)
 
 
+
+# ---------------------------------------------------------------------------
+# fal.ai models
+# ---------------------------------------------------------------------------
+#
+# Runs any fal.ai model and brings its images into Krita as layers. This
+# skips the AI plugin: fal is paid, but much faster than a local GPU and
+# hosts models this machine may not have. It talks to fal's queue API
+# directly, so the server still needs nothing beyond the standard library.
+
+FAL_QUEUE = "https://queue.fal.run"
+FAL_POLL_SECONDS = 1.5
+
+
+def _fal_call(method, url, body=None, timeout=120.0, auth=True):
+    import urllib.error
+    import urllib.request
+    headers = {"Content-Type": "application/json"}
+    if auth:
+        key = os.environ.get("FAL_KEY")
+        if not key:
+            raise BridgeError("fal_unavailable",
+                              "FAL_KEY is not set in the MCP server's environment.")
+        headers["Authorization"] = "Key " + key
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, method=method,
+                                     headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:800].decode("utf-8", "replace")
+        raise BridgeError("fal_error",
+                          "fal answered HTTP {0}: {1}".format(exc.code, detail))
+
+
+def _fal_json(method, url, body=None):
+    raw = _fal_call(method, url, body)
+    return json.loads(raw) if raw else {}
+
+
+def _fal_images(result):
+    """The image entries of a fal result, whatever the model calls them."""
+    images = result.get("images")
+    if images is None and isinstance(result.get("image"), dict):
+        images = [result["image"]]
+    return [i for i in (images or []) if isinstance(i, dict) and i.get("url")]
+
+
+def _fal_run(args):
+    document = args.get("document")
+    doc_args = {"document": document} if document is not None else {}
+    model = str(args["model"]).strip().strip("/")
+    fal_args = dict(args.get("arguments") or {})
+    image_input = args.get("image_input")
+    wait = max(10, min(AI_MAX_WAIT, int(args.get("wait_seconds", AI_DEFAULT_WAIT))))
+    thumb_size = int(args.get("max_size", 512))
+
+    canvas = BRIDGE.call("get_image", dict(
+        doc_args, max_size=int(args.get("input_max_size", 2048)),
+        include_data=bool(image_input)))
+    width, height = canvas["document"]["width"], canvas["document"]["height"]
+    if image_input:
+        uri = "data:image/png;base64," + canvas["png_base64"]
+        fal_args[image_input] = [uri] if args.get("image_input_list") else uri
+
+    started = time.time()
+    submitted = _fal_json("POST", "{0}/{1}".format(FAL_QUEUE, model), fal_args)
+    request_id = submitted.get("request_id")
+    while True:
+        state = _fal_json("GET", submitted["status_url"]).get("status")
+        if state == "COMPLETED":
+            break
+        if time.time() - started > wait:
+            raise BridgeError("fal_timeout",
+                              "fal request {0} is still {1} after {2} s."
+                              .format(request_id, state, wait))
+        time.sleep(FAL_POLL_SECONDS)
+    result = _fal_json("GET", submitted["response_url"])
+    images = _fal_images(result)
+
+    summary = {"model": model, "request_id": request_id,
+               "seconds": round(time.time() - started, 1),
+               "image_urls": [i["url"] for i in images]}
+    for key in ("seed", "has_nsfw_concepts", "prompt"):
+        if key in result:
+            summary[key] = result[key]
+    if not images:
+        summary["result"] = result
+        return [{"type": "text", "text": _summarise(summary)}]
+    if not args.get("add_layers", True):
+        return [{"type": "text", "text": _summarise(summary)}]
+
+    name = "fal " + model.split("/", 1)[-1]
+    group = BRIDGE.call("create_layer", dict(doc_args, name=name,
+                                             type="grouplayer"))["layer"]
+    layers = []
+    for index, image in enumerate(images, 1):
+        data = base64.b64encode(_fal_call("GET", image["url"], auth=False))
+        layer = BRIDGE.call("create_layer", dict(
+            doc_args, name="{0} {1}".format(name, index),
+            parent="uuid:" + group["uuid"]))["layer"]
+        BRIDGE.call("draw", dict(doc_args, layer="uuid:" + layer["uuid"], commands=[
+            {"type": "image", "x": 0, "y": 0, "w": width, "h": height,
+             "data": data.decode("ascii")}]))
+        layers.append(layer)
+    summary["group"] = group["name"]
+    summary["layers_bottom_to_top"] = [l["name"] for l in layers]
+
+    content = [{"type": "text", "text": _summarise(summary)}]
+    for layer in layers:
+        shot = BRIDGE.call("get_image", dict(doc_args, layer="uuid:" + layer["uuid"],
+                                             max_size=thumb_size))
+        content.append({"type": "text", "text": layer["name"]})
+        content.append({"type": "image", "data": shot["png_base64"],
+                        "mimeType": "image/png"})
+    return content
+
+
+FAL_TOOLS = [
+    tool("fal_run",
+         "Run a fal.ai model (paid per call, fast cloud GPUs) and add its "
+         "result images to Krita as new layers, in a group named after the "
+         "model. `image_input` names the model input that receives the "
+         "current canvas (e.g. image_url); omit it for text-only models. "
+         "Arguments are the model's own, as on its fal.ai API page. Example: "
+         "model fal-ai/qwen-image-layered, image_input image_url, arguments "
+         "{num_layers: 4} splits the canvas into 4 layers. Needs FAL_KEY.",
+         {"document": DOCUMENT_PROP,
+          "model": {"type": "string",
+                    "description": "fal endpoint id, e.g. fal-ai/qwen-image-layered"},
+          "arguments": {"type": "object"},
+          "image_input": {"type": "string"},
+          "image_input_list": {"type": "boolean", "default": False,
+                               "description": "Pass the canvas as a one-item "
+                                              "list (inputs like image_urls)."},
+          "input_max_size": {"type": "integer", "default": 2048},
+          "add_layers": {"type": "boolean", "default": True},
+          "wait_seconds": {"type": "integer", "default": AI_DEFAULT_WAIT},
+          "max_size": {"type": "integer", "default": 512}},
+         required=["model"]),
+]
+FAL_TOOLS[0]["_handler"] = _fal_run
+TOOLS.extend(FAL_TOOLS)
+
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
 
@@ -1006,8 +1151,10 @@ class Server:
                 "rough shapes on separate layers and link them with "
                 "ai_set_region. Edit models (style with edits_images) take an "
                 "instruction prompt and can see other layers via "
-                "`<layer:Name>`. A style with arch qwen_l splits the "
-                "canvas into `layer_count` separate layers. Show the user the result images and ai_apply only "
+                "`<layer:Name>`. To split the canvas into layers, use "
+                "fal_run with fal-ai/qwen-image-layered (the plugin's own "
+                "Qwen Layered mode returns unrelated layers in 1.53, issues "
+                "#2304 and #2535). Show the user the result images and ai_apply only "
                 "the one they want (or the clear best, when they said to go "
                 "ahead). Clear the selection afterwards."
             ),
