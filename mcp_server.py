@@ -992,7 +992,7 @@ class Server:
                 "paint onto a paint layer, and `get_image` to look at the "
                 "result. If nothing responds, run `self_test`.\n\n"
                 "AI generation goes through the AI Image Generation plugin "
-                "(ai_* tools), so Eric sees every change in its docker. "
+                "(ai_* tools), so the user sees every change in its docker. "
                 "To change one area: look first (get_image, inspect_document), "
                 "set_selection around the area, then ai_generate with a prompt "
                 "describing what should be there; the model sees the visible "
@@ -1002,8 +1002,8 @@ class Server:
                 "rough shapes on separate layers and link them with "
                 "ai_set_region. Edit models (style with edits_images) take an "
                 "instruction prompt and can see other layers via "
-                "`<layer:Name>`. Show Eric the result images and ai_apply only "
-                "the one he wants (or the clear best, when he said to go "
+                "`<layer:Name>`. Show the user the result images and ai_apply only "
+                "the one they want (or the clear best, when they said to go "
                 "ahead). Clear the selection afterwards."
             ),
         }
