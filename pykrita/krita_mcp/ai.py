@@ -239,7 +239,12 @@ def op_ai_status(params):
 @op("ai_list_styles", timeout=20.0)
 def op_ai_list_styles(params):
     p = _plugin()
-    model = _model(p, params)
+    try:
+        current = _model(p, params).style
+    except OpError as exc:
+        if exc.kind != "no_document":
+            raise
+        current = None  # styles do not depend on a document
     include_all = _as_bool(_arg(params, "include_unsupported", False),
                            "include_unsupported")
     out = []
@@ -249,7 +254,7 @@ def op_ai_list_styles(params):
             continue
         entry = _style_entry(p, style)
         entry["supported"] = supported
-        entry["current"] = style == model.style
+        entry["current"] = style == current
         out.append(entry)
     return {"styles": out}
 
